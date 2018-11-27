@@ -1,0 +1,325 @@
+---
+title: "music recommendation"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#EDA
+
+##split "train.csv" into train data and validate data
+```{r}
+library(tidyverse)
+
+setwd("/Users/yuguangyan/Desktop/music_recommendation")
+load("train.RData")
+#train<-read.csv("train.csv")
+#save(train,file="train.RData")
+
+#because prediction is based on the historical data, so we need to follow the time order. Data is given in time order, so we just choose the last 200,0000 rows for validation set.
+sum(is.na(train))#=0, means there is no na in train data.
+validation<-train[(dim(train)[1]-1999999):dim(train)[1],]
+train<-train[1:(dim(train)[1]-2000000),]
+```
+##EDA for train data
+
+```{r}
+library(ggplot2)
+library(magrittr)
+library(knitr)
+
+#how many songs a user have listened
+train_user<-train %>%
+  group_by(msno) %>%
+  summarise(count=n()) #There are 27169 users in the train dataset.Everyone has different number of history data.
+validation_user<-validation %>%
+  group_by(msno) %>%
+  summarise(count=n()) #There are 24044 users in the validation dataset.
+
+#wheather users in train data and validation data overlap
+length(intersect(train_user$msno,validation_user$msno))#There are 20468 overlapping users,which means that 85% users in validation dataset are old users.
+
+#number of observations in group0 and 1(target value)
+data_split<-train %>%
+  group_by(target) %>%
+  summarise(count=n()) #There are 2481398 user-song pairs of no-repeated; 2896020 user-song pairs of repeated, which means that the data has no bias.
+
+validataion_split<-validation %>%
+  group_by(target) %>%
+  summarise(count=n())
+
+#whether the times of a song played is related to the probability of repeated. 
+train_song<-train %>%
+  group_by(song_id) %>%
+  summarise(count = n(), p_repeated = mean(target)) %>%
+  arrange(desc(p_repeated)) %>%
+  filter(count>=30)
+ggplot(train_song) + geom_point(mapping = aes(x = count, y = p_repeated)) 
+```
+* The plot shows that when songs are played enough times(like more than 1500 times), with more times a song is played, the corresponding probability of the song repeated increases. So the times a song played is a factor of target.
+
+```{r}
+#source_system_tab difference between two groups
+train_tab<-train %>%
+  group_by(source_system_tab,target) %>%
+  summarise(count=n()) 
+train_tab_p<-train_tab %>%
+  spread(key = target,value = count)
+colnames(train_tab_p)<-c("source_system_tab","target0","target1")
+train_tab_p %<>%
+  mutate(probability_of_repeated = target1/(target0 + target1)) %>%
+  arrange(desc(probability_of_repeated))
+ggplot(train_tab,mapping = aes(x=source_system_tab,y=count)) + geom_bar(aes(fill=as.factor(target)),stat="Identity",position="dodge") + coord_flip()
+kable(train_tab_p)
+#It's not reasonable to delete the data without tab, because this situation also occur in validation set. So we should give tab value to "null" and "".
+```
+* This bar plot could tell us that most songs are played from "my library" and "discover".
+
+* The table and the bar plot shows that songs played from "my library"" are most likely to be listened reapeated, and different tabs have significant differences. 
+
+* source_system_tab is correlated to wheather the song would be listened repeatedly.
+
+```{r}
+#source_screen_name difference between two groups
+train_screen<-train %>%
+  group_by(source_screen_name,target) %>%
+  summarise(count=n()) 
+train_screen_p<-train_screen %>%
+  spread(key = target,value = count)
+colnames(train_screen_p)<-c("source_screen_name","target0","target1")
+train_screen_p %<>%
+  mutate(probability_of_repeated = target1/(target0 + target1)) %>%
+  arrange(desc(probability_of_repeated))
+ggplot(train_screen,mapping = aes(x=source_screen_name,y=count)) + geom_bar(aes(fill=as.factor(target)),stat="Identity",position="dodge") + coord_flip()
+kable(train_screen_p)
+```
+* This bar plot could tell us that most songs are played on "Local playlist more" screen.
+
+* The table and the bar plot shows that songs played on "my library" and "Local playlist more" are most likely to be listened reapeated, and different screens have significant differences. 
+
+* source_screen name is correlated to wheather the song would be listened repeatedly.
+```{r}
+#source_screen_name difference between two groups
+train_sourcetype<-train %>%
+  group_by(source_type,target) %>%
+  summarise(count=n()) 
+
+ggplot(train_sourcetype,mapping = aes(x=source_type,y=count)) + geom_bar(aes(fill=as.factor(target)),stat="Identity",position="dodge") + coord_flip()
+```
+##EDA for song data
+
+```{r}
+#song<-read.csv("songs.csv") #There are 2296320 songs in song dataset.
+#sum(is.na(song)) #有一个NA
+#save(song,file = "song.RData")
+load("song.RData")
+song<-na.omit(song)
+song_id_train<-unique(train$song_id)
+length(song_id_train) #There are 302582 songs in train dataset
+song_id_validation<-unique(validation$song_id)#194060
+
+#select songs data occured in train data and validation data
+song_train<-song %>%
+  filter(song_id %in% song_id_train)#302534 means there are 48 songs do not have data in "song.csv"
+
+song_validation<-song %>%
+  filter(song_id %in% song_id_validation)#194041 observations. means there are 19 songs do not have data in "song.csv"
+song_used<-rbind(song_train,song_validation)
+```
+
+```{r}
+ggplot(song_train) + geom_histogram(aes(x=song_length)) + labs("distrinution of song length")
+ggplot(song_train) + geom_histogram(aes(x=log(song_length))) + labs("distrinution of song length")
+```
+* The histogram plot shows that the song length distribution is right-skewed, so we do log transformation, then we can see that the distribution of log(song_length) is symmetric. 
+
+```{r}
+#difference in song length of two groups
+song_train_join<-inner_join(train,song_train,by="song_id")#5377309, because the 48 songs don't have song data, the train dataset has decreased from 5377418 to 5377309. difference is very small so will not influence EDA of the train dataset.
+song_validation_join<-inner_join(validation,song_validation,by="song_id")#1999959
+ggplot(song_train_join) + geom_boxplot(aes(x=as.factor(target), y=log(song_length),fill=as.factor(target)))
+
+cor.test(as.numeric(song_train_join$target),log(song_train_join$song_length))
+
+```
+*The boxplot shows there is no significant difference in log(song_length) between songs repeated and no-repeated. Then we do pearson test to see if this two group have significant difference in log(song_length). The 95% confidence interval is (0.01496808,0.01665808), which means that the correlation is significant, so log(song_length) is a predictor for target.
+
+```{r}
+data<-data.frame(song_train_join$song_length,song_train_join$target)
+data$song_train_join.target<-as.factor(data$song_train_join.target)
+aov<-aov(data$song_train_join.song_length~data$song_train_join.target)
+summary(aov)
+```
+*p-value=0.587, so that there is no significant difference between songs repeated and no-repeated, which is consistent with the boxplot. So song_length is not a good predictor.*
+
+```{r}
+#clean genre column which contains more than 1 genres
+genre_unique_train<-unique(song_train$genre_ids[!str_detect(song_train$genre_ids,"\\|")])#There are 147 genres in the songs with single genre in song_trains, contains unknown genre. 
+genre_unique_validation<-unique(song_validation$genre_ids[!str_detect(song_validation$genre_ids,"\\|")])#There are 134 genres in the songs with single genre in song_trains, contains unknown genre. 
+sum(as.character(song_train$genre_ids)=="")#There are 5776 songs(overlap) in song_train do not have genre data.
+sum(as.character(song_validation$genre_ids)=="")#There are 3203 songs(overlap) in song_validation do not have genre data.
+
+genre_more_train<-unique(song_train$genre_ids[str_detect(song_train$genre_ids,"\\|")])#There are 385 mixed genres in song_train
+genre_more_validation<-unique(song_validation$genre_ids[str_detect(song_validation$genre_ids,"\\|")])#There are 346 mixed genres in song_validation
+
+split<-function(genre_more){
+  n<-str_count(genre_more,pattern = "\\|")+1
+  genre_more<-str_c("|",genre_more,"|",sep="")
+
+  for(i in 1:length(genre_more)){
+    location<-str_locate_all(genre_more[i],"\\|")[[1]][,1]
+    re<-NA
+    for(j in 1:n[i]){
+      re[j]<-substring(genre_more[i],location[j]+1,location[j+1]-1)
+    }
+    if(i==1)
+      genre_split<-re
+    else
+      genre_split<-c(genre_split,re)
+    
+    if(i%%10000==0) print(i)
+
+  }
+  return(genre_split)
+}
+genre_split_train<-split(genre_more_train)
+genre_split_validation<-split(genre_more_validation)
+
+
+setdiff(genre_unique_train,genre_split_train)
+setdiff(genre_split_train,genre_unique_train)#There are 20 new genres which do not occur singly but occur with other genres in song_train
+setdiff(genre_unique_validation,genre_unique_train)
+a<-setdiff(genre_more_validation,genre_more_train)
+diff<-setdiff(c(genre_split_validation,genre_unique_validation),c(genre_split_train,genre_unique_train))#"2109","461","389" are three new genre in validation set. We change it to old genre through composer.
+
+#build data_frame which one row contains single genre_ids
+clean<-function(data){
+  n<-str_count(data$genre_ids,pattern = "\\|")+1
+  song_id<-rep(data$song_id,n)
+  target<-rep(data$target,n)
+  result<-cbind(song_id,target)
+  return(result)
+}
+
+a<-split(song_train_join$genre_ids)
+song_train_join_clean<-cbind(clean(song_train_join),a)
+
+```
+
+## Demographic features 
+
+###Age
+```{r}
+members<-read.csv("members.csv")
+save(members,file = "members.RData")
+load(members.RData)
+members_song_train_join<-inner_join(song_train_join,members,by="msno")#all of the users in train dataset has corresponding user data
+members_song_train_join$target<-as.factor(members_song_train_join$target)
+```
+
+
+```{r}
+#boxplot
+ggplot(members_song_train_join,aes(x=target,y=bd)) + stat_boxplot() + ylab("age") + xlab("target") + labs("distrinution of song length")
+#It shows that there are outliers in age data, we use average age of each group to replace the outliers.
+
+
+age_outliers<-boxplot.stats(members_song_train_join$bd)$out
+age_outliers<-c(age_outliers,members_song_train_join$bd[members_song_train_join$bd<=0])
+#There are 2130759 observations in train data having outlier ages.
+
+#calculate the average age for target=0,1
+target_age<-members_song_train_join %>%
+  filter(!bd %in% age_outliers) %>%
+  group_by(target) %>%
+  summarise(ave_age=mean(bd))
+
+members_song_train_join$bd[members_song_train_join$bd %in% age_outliers & members_song_train_join$target=="0"]<-29
+members_song_train_join$bd[members_song_train_join$bd %in% age_outliers & members_song_train_join$target=="1"]<-28.3
+ggplot(members_song_train_join,aes(x=target,y=bd,fill=target)) + geom_boxplot() + ylab("age") + xlab("target") + labs("distrinution of song length")
+```
+*After replacing outlier ages with average ages of two groups, the boxplot shows that older users  are less liekely to listen to a song repeatedly. So we could choose age as an predictor.*
+
+###city
+```{r}
+ggplot(members_song_train_join) + geom_bar(aes(x=city,fill=as.factor(target)),position="dodge") + coord_flip()
+city_p<-members_song_train_join %>%
+  group_by(city) %>%
+  summarise(p=mean(as.numeric(target))) 
+kable(city_p)
+
+city_n<-members_song_train_join %>%
+  group_by(city,target) %>%
+  summarise(count=n()) %>%
+  spread(key=target,value=count)
+city_n_new<-city_n[,c(2,3)]
+chisq.test(city_n_new)
+```
+*Chisquare test shows p_value<2.2e-16, which means city and target is significantly correlated*
+
+###gender
+```{r}
+ggplot(members_song_train_join) + geom_bar(aes(x=gender,fill=as.factor(target)),position="dodge") + coord_flip()
+gender_p<-members_song_train_join %>%
+  group_by(gender) %>%
+  summarise(p=mean(as.numeric(target)))
+kable(gender_p)
+
+gender_n<-members_song_train_join %>%
+  group_by(gender,target) %>%
+  summarise(count=n()) %>%
+  spread(key=target,value=count)
+gender_n_new<-gender_n[c(2,3),c(2,3)]
+chisq.test(gender_n_new)
+```
+*We could not see significant correlation between target and gender through barplot, so we do chisquare test. The test shows p_value<2.2e-16, which means gender and target is significantly correlated. But gender data is has great number of missing data, so we should drop this feature.*
+
+###registration method
+```{r}
+ggplot(members_song_train_join) + geom_bar(aes(x=registered_via,fill=as.factor(target)),position="dodge") + coord_flip()
+register_via_p<-members_song_train_join %>%
+  group_by(registered_via) %>%
+  summarise(p=mean(as.numeric(target)))
+kable(register_via_p)
+```
+*significant*
+
+###registration_init_time
+```{r}
+ggplot(members_song_train_join) + geom_boxplot(aes(x=target,y=registration_init_time)) 
+
+cor.test(as.numeric(members_song_train_join$target),members_song_train_join$registration_init_time)
+```
+*There is no significant difference in boxplot, so we do pearson test. Through the test, though p-value = 7.067e-13 < 0.05, the correlation between target and registration_init_time is -0.003095481, which is very small, so we don't choose registration_init_time as predictor.*
+
+###expiration_date
+```{r}
+ggplot(members_song_train_join) + 
+  geom_boxplot(aes(x=target,y=expiration_date)) 
+#delete outliers
+members_song_train_join<-members_song_train_join[members_song_train_join$expiration_date>=20000000,]
+cor.test(as.numeric(members_song_train_join$target),members_song_train_join$expiration_date)
+```
+*p-value < 2.2e-16, correlation = 0.05, expiration_date could be a predictor for target.*
+
+##feature matrix
+
+##correlation matrix
+
+##drop correlated feature
+
+##final feature matrix
+
+##partial pooling logistic model
+
+
+
+
+
+
+
+
+
+
+
